@@ -26,7 +26,13 @@ jobs:
       - name: Run containers
         timeout-minutes: 5
         run: |
-          docker compose up -d
+          if ! docker compose up -d; then
+            echo "=== PostgreSQL logs ==="
+            docker logs postgres || true
+            echo "=== Docker Compose status ==="
+            docker compose ps
+            exit 1
+          fi
           ./scripts/wait-script.sh
         env:
           WAIT_PORTS: 8080,8070,8060,8050
@@ -37,9 +43,9 @@ jobs:
         timeout-minutes: 5
         run: ./scripts/test-script.sh
         env:
-          VARIANT: <variant>
-          SERVICE_NAME: <your service name>
-          PORT_NUMBER: <port number>
+          VARIANT: v4
+          SERVICE_NAME: user-service
+          PORT_NUMBER: 8050
 
       - uses: education/autograding@v1
         id: autograder
