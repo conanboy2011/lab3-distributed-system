@@ -63,6 +63,7 @@ services:
       - "8070:8070"
     environment:
       - DB_URL=postgresql://program:test@postgres:5432/reservations
+      - TZ=${TZ:-Europe/Amsterdam}
     depends_on:
       postgres:
         condition: service_healthy

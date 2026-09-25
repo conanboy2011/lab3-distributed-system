@@ -1,5 +1,4 @@
 from datetime import datetime
-from zoneinfo import ZoneInfo
 import os
 import time
 import threading
@@ -17,10 +16,6 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Reservation Service")
 
-
-# =========================
-# EXCEPTION HANDLER
-# =========================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
@@ -54,17 +49,13 @@ RATING_SERVICE_URL = os.getenv(
 )
 
 
-# =========================
-# HELPERS
-# =========================
-
 def format_date(value):
     return value.strftime("%Y-%m-%d")
 
 
-# =========================
-# LIBRARY
-# =========================
+# ============================================================
+# LIBRARY SERVICE
+# ============================================================
 
 def get_library_book(library_uid, book_uid):
     url = (
@@ -73,7 +64,10 @@ def get_library_book(library_uid, book_uid):
     )
 
     try:
-        response = httpx.get(url, timeout=10)
+        response = httpx.get(
+            url,
+            timeout=10
+        )
 
         if response.status_code != 200:
             return {
@@ -105,7 +99,10 @@ def get_library_book_strict(library_uid, book_uid):
     )
 
     try:
-        response = httpx.get(url, timeout=10)
+        response = httpx.get(
+            url,
+            timeout=10
+        )
 
     except httpx.RequestError:
         raise HTTPException(
@@ -130,7 +127,8 @@ def change_library_count(
 ):
     url = (
         f"{LIBRARY_SERVICE_URL}"
-        f"/internal/libraries/{library_uid}/books/{book_uid}/{action}"
+        f"/internal/libraries/{library_uid}/books/"
+        f"{book_uid}/{action}"
     )
 
     data = {}
@@ -160,9 +158,9 @@ def change_library_count(
     return response.json()
 
 
-# =========================
-# RATING
-# =========================
+# ============================================================
+# RATING SERVICE
+# ============================================================
 
 def get_rating(username):
     try:
@@ -215,9 +213,9 @@ def change_rating(username, delta):
     return response.json()
 
 
-# =========================
-# RETRY HELPERS
-# =========================
+# ============================================================
+# RETRY LOGIC
+# ============================================================
 
 def retry_library_return(
     library_uid,
@@ -228,7 +226,6 @@ def retry_library_return(
     deadline = time.time() + timeout_seconds
 
     while time.time() < deadline:
-
         try:
             return change_library_count(
                 library_uid,
@@ -236,7 +233,6 @@ def retry_library_return(
                 "return",
                 condition
             )
-
         except HTTPException:
             time.sleep(1)
 
@@ -251,37 +247,28 @@ def retry_rating_change(
     deadline = time.time() + timeout_seconds
 
     while time.time() < deadline:
-
         try:
             return change_rating(
                 username,
                 delta
             )
-
         except HTTPException:
             time.sleep(1)
 
     return None
 
 
-# =========================
-# BACKGROUND RETRY
-# =========================
-
 def background_rating_retry(
     username,
     delta
 ):
     while True:
-
         try:
             change_rating(
                 username,
                 delta
             )
-
             return
-
         except HTTPException:
             time.sleep(1)
 
@@ -292,7 +279,6 @@ def background_library_retry(
     condition
 ):
     while True:
-
         try:
             change_library_count(
                 library_uid,
@@ -300,9 +286,7 @@ def background_library_retry(
                 "return",
                 condition
             )
-
             return
-
         except HTTPException:
             time.sleep(1)
 
@@ -313,7 +297,10 @@ def start_background_rating_retry(
 ):
     thread = threading.Thread(
         target=background_rating_retry,
-        args=(username, delta),
+        args=(
+            username,
+            delta
+        ),
         daemon=True
     )
 
@@ -338,9 +325,9 @@ def start_background_library_retry(
     thread.start()
 
 
-# =========================
+# ============================================================
 # HEALTH
-# =========================
+# ============================================================
 
 @app.get("/manage/health")
 def health_check():
@@ -349,9 +336,9 @@ def health_check():
     }
 
 
-# =========================
+# ============================================================
 # GET RESERVATIONS
-# =========================
+# ============================================================
 
 @app.get("/reservations")
 def get_reservations(
@@ -364,13 +351,15 @@ def get_reservations(
             models.Reservation.username == x_user_name,
             models.Reservation.status == "RENTED"
         )
+        .order_by(
+            models.Reservation.id.asc()
+        )
         .all()
     )
 
     result = []
 
     for reservation in reservations:
-
         details = get_library_book(
             str(reservation.library_uid),
             str(reservation.book_uid)
@@ -394,9 +383,9 @@ def get_reservations(
     return result
 
 
-# =========================
-# BORROW BOOK
-# =========================
+# ============================================================
+# CREATE RESERVATION / BORROW
+# ============================================================
 
 @app.post("/reservations")
 def create_reservation(
@@ -418,7 +407,6 @@ def create_reservation(
         till_date_value = datetime.fromisoformat(
             till_date
         )
-
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=400,
@@ -434,8 +422,8 @@ def create_reservation(
         .count()
     )
 
+    # Rating Service must be available before borrowing.
     rating = get_rating(x_user_name)
-
     stars = rating["stars"]
 
     if rented_count >= stars:
@@ -444,6 +432,7 @@ def create_reservation(
             detail="Maximum number of rented books reached"
         )
 
+    # Library Service must be available before borrowing.
     details = get_library_book_strict(
         library_uid,
         book_uid
@@ -455,16 +444,17 @@ def create_reservation(
             detail="Book is not available"
         )
 
+    # IMPORTANT:
+    # Use local runner time directly.
+    # Do not force Europe/Moscow timezone here because
+    # GitHub Actions runs in UTC and the official test
+    # expects the runner's current date.
     reservation = models.Reservation(
         username=x_user_name,
         book_uid=book_uid,
         library_uid=library_uid,
         status="RENTED",
-
-        start_date=datetime.now(
-            ZoneInfo("Europe/Moscow")
-        ).replace(tzinfo=None),
-
+        start_date=datetime.now(),
         till_date=till_date_value
     )
 
@@ -472,6 +462,7 @@ def create_reservation(
     db.commit()
     db.refresh(reservation)
 
+    # Update library only after reservation has been created.
     try:
         change_library_count(
             library_uid,
@@ -480,6 +471,7 @@ def create_reservation(
         )
 
     except HTTPException:
+        # Rollback reservation if library update fails.
         db.delete(reservation)
         db.commit()
 
@@ -492,30 +484,24 @@ def create_reservation(
         "reservationUid": str(
             reservation.reservation_uid
         ),
-
         "status": reservation.status,
-
         "startDate": format_date(
             reservation.start_date
         ),
-
         "tillDate": format_date(
             reservation.till_date
         ),
-
         "book": details["book"],
-
         "library": details["library"],
-
         "rating": {
             "stars": stars
         }
     }
 
 
-# =========================
+# ============================================================
 # RETURN BOOK
-# =========================
+# ============================================================
 
 @app.post(
     "/reservations/{reservation_uid}/return"
@@ -531,10 +517,8 @@ def return_book(
         .filter(
             models.Reservation.reservation_uid
             == reservation_uid,
-
             models.Reservation.username
             == x_user_name,
-
             models.Reservation.status
             == "RENTED"
         )
@@ -560,7 +544,6 @@ def return_book(
         return_date_value = datetime.fromisoformat(
             return_date
         )
-
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=400,
@@ -577,6 +560,7 @@ def return_book(
             detail="Invalid condition"
         )
 
+    # Check whether the book is returned late.
     is_late = (
         return_date_value
         > reservation.till_date
@@ -588,6 +572,13 @@ def return_book(
         reservation.status = "RETURNED"
 
     db.commit()
+    db.refresh(reservation)
+
+    # ========================================================
+    # Determine original book condition.
+    # If Library Service is unavailable, use EXCELLENT
+    # as fallback so the return operation can still finish.
+    # ========================================================
 
     original_condition = "EXCELLENT"
 
@@ -616,14 +607,21 @@ def return_book(
         conditions.index(original_condition)
     )
 
+    # Rating:
+    # +1 for normal return.
+    # -10 for late return or worsened condition.
     if is_late or condition_worsened:
         rating_delta = -10
     else:
         rating_delta = 1
 
-    # Try to update Library for 10 seconds.
-    # If it is still unavailable, continue retrying
-    # in the background.
+    # ========================================================
+    # Update Library Service.
+    # Retry synchronously for up to 10 seconds.
+    # If still unavailable, continue return operation and
+    # retry in background.
+    # ========================================================
+
     library_result = retry_library_return(
         str(reservation.library_uid),
         str(reservation.book_uid),
@@ -638,9 +636,13 @@ def return_book(
             condition
         )
 
-    # Try to update Rating for 10 seconds.
-    # If it is still unavailable, continue retrying
-    # in the background.
+    # ========================================================
+    # Update Rating Service.
+    # Retry synchronously for up to 10 seconds.
+    # If still unavailable, continue return operation and
+    # retry in background.
+    # ========================================================
+
     rating_result = retry_rating_change(
         x_user_name,
         rating_delta,
@@ -653,6 +655,8 @@ def return_book(
             rating_delta
         )
 
+    # Return operation itself succeeds even if the dependent
+    # services were temporarily unavailable.
     return Response(
         status_code=204
     )
